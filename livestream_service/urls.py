@@ -6,9 +6,6 @@ from django.conf.urls.static import static
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', include('livestream.urls')),
-    path('api/streaming/', include('streaming.urls')),
-    path('api/analytics/', include('analytics.urls')),
-    path('health/', include('core.urls')),
 ]
 
 if settings.DEBUG:

@@ -1,0 +1,20 @@
+2025-06-22T18:03:12.887+0100	ERROR	livekit	config/config.go:576	secret is too short, should be at least 32 characters for security	{"apiKey": "devkey"}
+github.com/livekit/livekit-server/pkg/config.(*Config).ValidateKeys
+	github.com/livekit/livekit-server/pkg/config/config.go:576
+main.startServer
+	github.com/livekit/livekit-server/cmd/server/main.go:252
+github.com/urfave/cli/v2.(*Command).Run
+	github.com/urfave/cli/v2@v2.27.5/command.go:276
+github.com/urfave/cli/v2.(*App).RunContext
+	github.com/urfave/cli/v2@v2.27.5/app.go:333
+github.com/urfave/cli/v2.(*App).Run
+	github.com/urfave/cli/v2@v2.27.5/app.go:307
+main.main
+	github.com/livekit/livekit-server/cmd/server/main.go:185
+runtime.main
+	runtime/proc.go:283
+2025-06-22T18:03:12.888+0100	INFO	livekit	routing/interfaces.go:175	using single-node routing
+2025-06-22T18:03:14.134+0100	INFO	livekit	rtcconfig/webrtc_config.go:102	using external IPs	{"ips": ["41.184.238.204/192.168.1.170"]}
+2025-06-22T18:03:14.137+0100	INFO	livekit	service/server.go:265	starting LiveKit server	{"portHttp": 7880, "nodeID": "ND_NTWojgWCLV4A", "nodeIP": "41.184.238.204", "version": "1.9.0", "bindAddresses": ["0.0.0.0"], "rtc.portTCP": 7881, "rtc.portICERange": [50000, 60000]}
+2025-06-22T18:11:13.889+0100	INFO	livekit	server/main.go:291	exit requested, shutting down	{"signal": "interrupt", "force": false}
+2025-06-22T18:11:13.890+0100	INFO	livekit	server/main.go:291	exit requested, shutting down	{"signal": "terminated", "force": true}

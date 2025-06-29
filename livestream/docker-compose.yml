@@ -1,0 +1,118 @@
+version: '3.8'
+
+services:
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=False
+      - SECRET_KEY=${SECRET_KEY}
+      - LIVESTREAM_DB_NAME=${LIVESTREAM_DB_NAME}
+      - LIVESTREAM_DB_USER=${LIVESTREAM_DB_USER}
+      - LIVESTREAM_DB_PASSWORD=${LIVESTREAM_DB_PASSWORD}
+      - LIVESTREAM_DB_HOST=${LIVESTREAM_DB_HOST}
+      - LIVESTREAM_DB_PORT=${LIVESTREAM_DB_PORT}
+      - REDIS_URL=${REDIS_URL}
+      - MAIN_APP_URL=${MAIN_APP_URL}
+      - LIVEKIT_WS_URL=${LIVEKIT_WS_URL}
+      - LIVEKIT_HTTP_URL=${LIVEKIT_HTTP_URL}
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
+    volumes:
+      - recordings:/var/recordings
+      - static_volume:/app/static
+      - media_volume:/app/media
+    depends_on:
+      - redis
+      - postgres
+    restart: unless-stopped
+    command: >
+      sh -c "
+        python manage.py migrate &&
+        daphne -b 0.0.0.0 -p 8000 livestream_project.asgi:application
+      "
+
+  celery:
+    build: .
+    environment:
+      - DEBUG=False
+      - SECRET_KEY=${SECRET_KEY}
+      - LIVESTREAM_DB_NAME=${LIVESTREAM_DB_NAME}
+      - LIVESTREAM_DB_USER=${LIVESTREAM_DB_USER}
+      - LIVESTREAM_DB_PASSWORD=${LIVESTREAM_DB_PASSWORD}
+      - LIVESTREAM_DB_HOST=${LIVESTREAM_DB_HOST}
+      - LIVESTREAM_DB_PORT=${LIVESTREAM_DB_PORT}
+      - REDIS_URL=${REDIS_URL}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
+    volumes:
+      - recordings:/var/recordings
+    depends_on:
+      - redis
+      - postgres
+    restart: unless-stopped
+    command: celery -A livestream_project worker -l info
+
+  celery-beat:
+    build: .
+    environment:
+      - DEBUG=False
+      - SECRET_KEY=${SECRET_KEY}
+      - LIVESTREAM_DB_NAME=${LIVESTREAM_DB_NAME}
+      - LIVESTREAM_DB_USER=${LIVESTREAM_DB_USER}
+      - LIVESTREAM_DB_PASSWORD=${LIVESTREAM_DB_PASSWORD}
+      - LIVESTREAM_DB_HOST=${LIVESTREAM_DB_HOST}
+      - LIVESTREAM_DB_PORT=${LIVESTREAM_DB_PORT}
+      - REDIS_URL=${REDIS_URL}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
+    depends_on:
+      - redis
+      - postgres
+    restart: unless-stopped
+    command: celery -A livestream_project beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_DB=${LIVESTREAM_DB_NAME}
+      - POSTGRES_USER=${LIVESTREAM_DB_USER}
+      - POSTGRES_PASSWORD=${LIVESTREAM_DB_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - static_volume:/app/static
+      - media_volume:/app/media
+      - recordings:/var/recordings
+    depends_on:
+      - web
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  static_volume:
+  media_volume:
+  recordings:

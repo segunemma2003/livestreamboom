@@ -1,0 +1,18 @@
+# Minimal LiveKit configuration for WSS
+port: 7880
+bind_addresses: ["0.0.0.0"]
+
+# Certificate files (correct format)
+cert_file: livekit-cert.pem
+key_file: livekit-key.pem
+
+# Basic settings
+keys:
+  devkey: secret
+
+room:
+  empty_timeout: 300
+  max_participants: 1000
+
+logging:
+  level: info
