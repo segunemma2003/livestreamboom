@@ -36,11 +36,11 @@ INSTALLED_APPS = [
     'corsheaders',
     'django_celery_beat',
     
-    # Local apps
-    'core',
-    'livestream',
-    'analytics',
-    'streaming',
+    # Local apps - using correct app names from your structure
+    'apps.core',
+    'apps.livestream',
+    'apps.analytics',
+    'apps.streaming',
 ]
 
 MIDDLEWARE = [
@@ -54,7 +54,7 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-ROOT_URLCONF = 'livestream_service.urls'
+ROOT_URLCONF = 'livestream_project.urls'
 
 TEMPLATES = [
     {
@@ -72,8 +72,8 @@ TEMPLATES = [
     },
 ]
 
-WSGI_APPLICATION = 'livestream_service.wsgi.application'
-ASGI_APPLICATION = 'livestream_service.asgi.application'
+WSGI_APPLICATION = 'livestream_project.wsgi.application'
+ASGI_APPLICATION = 'livestream_project.asgi.application'
 
 # Database
 if os.environ.get('LIVESTREAM_DB_HOST'):
@@ -190,7 +190,7 @@ CHANNEL_LAYERS = {
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework.authentication.SessionAuthentication',
-        'core.authentication.ServiceTokenAuthentication',
+        'apps.core.authentication.ServiceTokenAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
