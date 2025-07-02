@@ -6,7 +6,12 @@ import sys
 
 def main():
     """Run administrative tasks."""
-    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'livestream_project.settings')
+    # Use production settings by default in production environment
+    if os.environ.get('DJANGO_ENV') == 'production':
+        os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'livestream_project.settings_production')
+    else:
+        os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'livestream_project.settings')
+    
     try:
         from django.core.management import execute_from_command_line
     except ImportError as exc:

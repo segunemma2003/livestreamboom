@@ -32,7 +32,7 @@ COPY . .
 RUN mkdir -p /app/media /app/static /app/logs /var/recordings
 
 # Collect static files (will be overridden in production)
-RUN python manage.py collectstatic --noinput --settings=livestream_service.settings || true
+RUN python manage.py collectstatic --noinput --settings=livestream_project.settings_production || true
 
 # Create a non-root user
 RUN adduser --disabled-password --gecos '' appuser
@@ -47,4 +47,4 @@ HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health/ || exit 1
 
 # Start command - use gunicorn for production
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "3", "--timeout", "120", "livestream_service.wsgi:application"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "3", "--timeout", "120", "livestream_project.wsgi:application"]
