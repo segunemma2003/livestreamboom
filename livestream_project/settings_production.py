@@ -246,7 +246,6 @@ if EMAIL_BACKEND == 'django.core.mail.backends.smtp.EmailBackend':
     EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
     EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
 
-# Logging Configuration
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
@@ -261,12 +260,6 @@ LOGGING = {
         },
     },
     'handlers': {
-        'file': {
-            'level': 'INFO',
-            'class': 'logging.FileHandler',
-            'filename': '/app/logs/django.log',
-            'formatter': 'verbose',
-        },
         'console': {
             'level': 'INFO',
             'class': 'logging.StreamHandler',
@@ -274,23 +267,43 @@ LOGGING = {
         },
     },
     'root': {
-        'handlers': ['console', 'file'],
+        'handlers': ['console'],
         'level': 'INFO',
     },
     'loggers': {
         'django': {
-            'handlers': ['console', 'file'],
+            'handlers': ['console'],
             'level': os.environ.get('LOG_LEVEL', 'INFO'),
             'propagate': False,
         },
         'livestream': {
-            'handlers': ['console', 'file'],
+            'handlers': ['console'],
             'level': 'DEBUG',
             'propagate': False,
         },
     },
 }
 
+# Only add file logging if we're in a Docker container or have write permissions
+if os.path.exists('/app') or os.environ.get('DOCKER_CONTAINER'):
+    # Create logs directory if it doesn't exist
+    log_dir = Path('/app/logs')
+    log_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Add file handler only if directory exists and is writable
+    if log_dir.exists() and os.access(log_dir, os.W_OK):
+        LOGGING['handlers']['file'] = {
+            'level': 'INFO',
+            'class': 'logging.FileHandler',
+            'filename': '/app/logs/django.log',
+            'formatter': 'verbose',
+        }
+        # Add file handler to existing handlers
+        LOGGING['root']['handlers'].append('file')
+        LOGGING['loggers']['django']['handlers'].append('file')
+        LOGGING['loggers']['livestream']['handlers'].append('file')
+        
+        
 # Security Settings for Production
 if not DEBUG:
     SECURE_SSL_REDIRECT = True
