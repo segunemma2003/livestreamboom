@@ -14,3 +14,5 @@ boto3
 django-storages
 gunicorn
 django-redis
+django-extensions
+django-filter
