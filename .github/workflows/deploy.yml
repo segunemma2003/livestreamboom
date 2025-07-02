@@ -2,9 +2,12 @@ name: Deploy to AWS Elastic Beanstalk
 
 on:
   push:
-    branches: [main, production]
+    branches: [main, production, develop, staging]
   pull_request:
     branches: [main]
+
+env:
+  AWS_REGION: us-east-1
 
 jobs:
   test:
@@ -35,7 +38,8 @@ jobs:
           - 6379:6379
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -55,9 +59,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run tests
+      - name: Create logs directory
+        run: mkdir -p logs
+
+      - name: Run migrations
         env:
-          SECRET_KEY: "test-secret-key"
+          SECRET_KEY: "test-secret-key-for-ci"
           DEBUG: "True"
           LIVESTREAM_DB_NAME: "test_db"
           LIVESTREAM_DB_USER: "postgres"
@@ -67,65 +74,91 @@ jobs:
           REDIS_URL: "redis://localhost:6379/0"
         run: |
           python manage.py migrate
+
+      - name: Run tests
+        env:
+          SECRET_KEY: "test-secret-key-for-ci"
+          DEBUG: "True"
+          LIVESTREAM_DB_NAME: "test_db"
+          LIVESTREAM_DB_USER: "postgres"
+          LIVESTREAM_DB_PASSWORD: "postgres"
+          LIVESTREAM_DB_HOST: "localhost"
+          LIVESTREAM_DB_PORT: "5432"
+          REDIS_URL: "redis://localhost:6379/0"
+        run: |
           python manage.py test
 
-  deploy:
+  deploy-staging:
     needs: test
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/production'
+    if: github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/staging'
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          python-version: "3.11"
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push staging image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: livestream-service
+          IMAGE_TAG: staging-${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:staging-latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:staging-latest
+
+      - name: Update Dockerrun.aws.json for staging
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: livestream-service
+          IMAGE_TAG: staging-${{ github.sha }}
+        run: |
+          sed -i "s|your-ecr-repo/livestream-service:latest|$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG|g" Dockerrun.aws.json
 
       - name: Install EB CLI
         run: |
           python -m pip install --upgrade pip
           pip install awsebcli
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Create deployment package
+      - name: Deploy to staging environment
         run: |
-          zip -r deploy-$(date +%Y%m%d-%H%M%S).zip . -x "*.git*" "*.pytest_cache*" "*__pycache__*" "*.coverage*"
+          eb init ${{ secrets.EB_APPLICATION_NAME }} --region ${{ env.AWS_REGION }} --platform "Docker running on 64bit Amazon Linux 2"
+          eb use ${{ secrets.EB_STAGING_ENVIRONMENT_NAME }}
+          eb deploy --timeout 20
 
-      - name: Deploy to EB
-        run: |
-          eb init ${{ secrets.EB_APPLICATION_NAME }} --region ${{ secrets.AWS_REGION }} --platform python-3.11
-          eb deploy ${{ secrets.EB_ENVIRONMENT_NAME }}
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-  deploy-docker:
+  deploy-production:
     needs: test
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/production'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/production'
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build, tag, and push image to Amazon ECR
+      - name: Build, tag, and push production image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: livestream-service
@@ -136,15 +169,53 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
-      - name: Update Dockerrun.aws.json
+      - name: Update Dockerrun.aws.json for production
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: livestream-service
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          sed -i "s|your-ecr-repo/livestream-service:latest|$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG|g" livestream/Dockerrun.aws.json
+          sed -i "s|your-ecr-repo/livestream-service:latest|$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG|g" Dockerrun.aws.json
 
-      - name: Deploy to EB with Docker
+      - name: Install EB CLI
         run: |
-          eb init ${{ secrets.EB_APPLICATION_NAME }} --region ${{ secrets.AWS_REGION }} --platform docker
-          eb deploy ${{ secrets.EB_ENVIRONMENT_NAME }}
+          python -m pip install --upgrade pip
+          pip install awsebcli
+
+      - name: Deploy to production environment
+        run: |
+          eb init ${{ secrets.EB_APPLICATION_NAME }} --region ${{ env.AWS_REGION }} --platform "Docker running on 64bit Amazon Linux 2"
+          eb use ${{ secrets.EB_ENVIRONMENT_NAME }}
+          eb deploy --timeout 20
+
+      - name: Health check
+        run: |
+          sleep 30
+          EB_URL=$(eb status | grep "CNAME" | awk '{print $2}')
+          if [ ! -z "$EB_URL" ]; then
+            HEALTH_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" "http://$EB_URL/health/" || echo "000")
+            if [ "$HEALTH_RESPONSE" = "200" ]; then
+              echo "✅ Health check passed! Application is running at: http://$EB_URL"
+            else
+              echo "❌ Health check failed! HTTP status: $HEALTH_RESPONSE"
+              exit 1
+            fi
+          else
+            echo "⚠️ Could not retrieve application URL for health check"
+          fi
+
+  notify:
+    needs: [deploy-production, deploy-staging]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Notify deployment status
+        run: |
+          if [ "${{ needs.deploy-production.result }}" = "success" ]; then
+            echo "🚀 Production deployment successful!"
+          elif [ "${{ needs.deploy-staging.result }}" = "success" ]; then
+            echo "🧪 Staging deployment successful!"
+          else
+            echo "❌ Deployment failed!"
+          fi

@@ -1,0 +1,84 @@
+{
+  "AWSEBDockerrunVersion": 2,
+  "containerDefinitions": [
+    {
+      "name": "web",
+      "image": "934155604952.dkr.ecr.us-east-1.amazonaws.com/livestream-service:latest",
+      "essential": true,
+      "memory": 2048,
+      "cpu": 1024,
+      "portMappings": [
+        {
+          "hostPort": 80,
+          "containerPort": 8000,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "DEBUG",
+          "value": "False"
+        },
+        {
+          "name": "DJANGO_SETTINGS_MODULE",
+          "value": "livestream_project.settings_production"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/aws/elasticbeanstalk/livestream-service",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "web"
+        }
+      },
+      "mountPoints": [
+        {
+          "sourceVolume": "recordings",
+          "containerPath": "/var/recordings"
+        }
+      ]
+    },
+    {
+      "name": "celery",
+      "image": "934155604952.dkr.ecr.us-east-1.amazonaws.com/livestream-service:latest",
+      "essential": false,
+      "memory": 1024,
+      "cpu": 512,
+      "command": [
+        "celery",
+        "-A",
+        "livestream_project",
+        "worker",
+        "-l",
+        "info"
+      ],
+      "environment": [
+        {
+          "name": "DEBUG",
+          "value": "False"
+        },
+        {
+          "name": "DJANGO_SETTINGS_MODULE",
+          "value": "livestream_project.settings_production"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/aws/elasticbeanstalk/livestream-service",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "celery"
+        }
+      }
+    }
+  ],
+  "volumes": [
+    {
+      "name": "recordings",
+      "host": {
+        "sourcePath": "/var/recordings"
+      }
+    }
+  ]
+}

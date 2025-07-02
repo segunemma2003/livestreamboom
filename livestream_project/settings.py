@@ -33,7 +33,7 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-ROOT_URLCONF = 'livestream_service.urls'
+ROOT_URLCONF = 'livestream_project.urls'
 
 TEMPLATES = [
     {
@@ -51,7 +51,7 @@ TEMPLATES = [
     },
 ]
 
-WSGI_APPLICATION = 'livestream_service.wsgi.application'
+WSGI_APPLICATION = 'livestream_project.wsgi.application'
 
 DATABASES = {
     'default': {
