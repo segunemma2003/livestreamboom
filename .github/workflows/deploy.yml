@@ -94,44 +94,126 @@ jobs:
         run: |
           echo "Testing Docker image locally..."
           
-          # Start container in background
+          # Start container in background with proper environment variables
           CONTAINER_ID=$(docker run -d \
             -p 8000:8000 \
             -e DEBUG=False \
             -e DJANGO_SETTINGS_MODULE=livestream_project.settings_production \
-            -e SECRET_KEY=test-key-for-build \
+            -e SECRET_KEY=test-key-for-build-$(date +%s) \
+            -e ALLOWED_HOSTS="localhost,127.0.0.1,*" \
+            -e PYTHONPATH=/app \
+            --health-cmd="curl -f http://localhost:8000/health/ || exit 1" \
+            --health-interval=10s \
+            --health-timeout=5s \
+            --health-retries=3 \
+            --health-start-period=30s \
             $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG)
           
           echo "Container ID: $CONTAINER_ID"
           
-          # Wait for container to start
-          echo "Waiting for container to start..."
-          sleep 30
+          # Function to check container status
+          check_container_status() {
+            local status=$(docker inspect --format='{{.State.Status}}' $CONTAINER_ID 2>/dev/null)
+            echo $status
+          }
           
-          # Check if container is running
-          if docker ps | grep $CONTAINER_ID; then
-            echo "Container is running"
+          # Function to check container health
+          check_container_health() {
+            local health=$(docker inspect --format='{{.State.Health.Status}}' $CONTAINER_ID 2>/dev/null)
+            echo $health
+          }
+          
+          # Wait for container to start and become healthy
+          echo "Waiting for container to start..."
+          MAX_WAIT=120  # 2 minutes
+          WAIT_TIME=0
+          
+          while [ $WAIT_TIME -lt $MAX_WAIT ]; do
+            STATUS=$(check_container_status)
+            HEALTH=$(check_container_health)
             
-            # Test health endpoint
-            for i in {1..10}; do
-              if curl -f http://localhost:8000/health/ 2>/dev/null; then
-                echo "Health check passed!"
+            echo "Time: ${WAIT_TIME}s - Status: $STATUS, Health: $HEALTH"
+            
+            if [ "$STATUS" = "running" ]; then
+              if [ "$HEALTH" = "healthy" ] || [ "$HEALTH" = "" ]; then
+                echo "✅ Container is running and healthy!"
                 break
               fi
-              echo "Health check attempt $i failed, retrying in 5s..."
-              sleep 5
-            done
+            elif [ "$STATUS" = "exited" ]; then
+              echo "❌ Container exited unexpectedly"
+              echo "Container logs:"
+              docker logs $CONTAINER_ID
+              exit 1
+            fi
             
-            # Show container logs
+            sleep 5
+            WAIT_TIME=$((WAIT_TIME + 5))
+          done
+          
+          # Final status check
+          FINAL_STATUS=$(check_container_status)
+          if [ "$FINAL_STATUS" != "running" ]; then
+            echo "❌ Container failed to start properly"
+            echo "Final status: $FINAL_STATUS"
             echo "Container logs:"
-            docker logs $CONTAINER_ID
-          else
-            echo "ERROR: Container failed to start"
             docker logs $CONTAINER_ID
             exit 1
           fi
           
+          # Test health endpoint directly
+          echo "Testing health endpoint..."
+          HEALTH_SUCCESS=false
+          
+          for i in {1..12}; do  # Try for 1 minute
+            echo "Health check attempt $i/12..."
+            
+            if curl -f -s --max-time 10 http://localhost:8000/health/; then
+              echo "✅ Health check passed!"
+              HEALTH_SUCCESS=true
+              break
+            fi
+            
+            # Show more detailed curl output for debugging
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/health/ 2>/dev/null || echo "000")
+            echo "HTTP status code: $HTTP_CODE"
+            
+            if [ $i -eq 6 ]; then
+              echo "Health check taking longer than expected, showing container logs:"
+              docker logs --tail=20 $CONTAINER_ID
+            fi
+            
+            sleep 5
+          done
+          
+          if [ "$HEALTH_SUCCESS" = false ]; then
+            echo "❌ Health check failed after all attempts"
+            echo "Final container logs:"
+            docker logs $CONTAINER_ID
+            
+            echo "Container inspect:"
+            docker inspect $CONTAINER_ID
+            
+            echo "Attempting to connect to container directly:"
+            docker exec $CONTAINER_ID curl -v http://localhost:8000/health/ || true
+            
+            exit 1
+          fi
+          
+          # Test additional endpoints if health passes
+          echo "Testing additional endpoints..."
+          
+          # Test if Django admin is accessible (should return 302 or 200)
+          ADMIN_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/admin/ 2>/dev/null || echo "000")
+          echo "Admin endpoint status: $ADMIN_CODE"
+          
+          # Test API endpoint
+          API_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/api/ 2>/dev/null || echo "000")
+          echo "API endpoint status: $API_CODE"
+          
+          echo "✅ Docker container test completed successfully!"
+          
           # Cleanup
+          echo "Stopping and removing container..."
           docker stop $CONTAINER_ID
           docker rm $CONTAINER_ID
 
