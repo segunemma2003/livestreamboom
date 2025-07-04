@@ -7,10 +7,17 @@ on:
       - develop
       - staging
 
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: 934155604952.dkr.ecr.us-east-1.amazonaws.com
+  ECR_REPOSITORY: livestream-service
+
 jobs:
   deploy-production:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -20,7 +27,7 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
@@ -28,7 +35,6 @@ jobs:
       - name: Extract ECR registry and repository from URI
         id: ecr-info
         run: |
-          # Extract registry and repository from ECR_REPOSITORY_URI
           ECR_URI="${{ secrets.ECR_REPOSITORY_URI }}"
           ECR_REGISTRY=$(echo $ECR_URI | cut -d'/' -f1)
           ECR_REPOSITORY=$(echo $ECR_URI | cut -d'/' -f2)
@@ -39,15 +45,112 @@ jobs:
           echo "ECR Registry: $ECR_REGISTRY"
           echo "ECR Repository: $ECR_REPOSITORY"
 
-      - name: Build, tag, and push Docker image to ECR
+      - name: Validate Dockerfile and dependencies
+        run: |
+          echo "Validating Dockerfile..."
+          docker --version
+          
+          echo "Checking Python requirements..."
+          if [ -f requirements.txt ]; then
+            echo "Requirements file found"
+            head -10 requirements.txt
+          else
+            echo "ERROR: requirements.txt not found"
+            exit 1
+          fi
+          
+          echo "Checking Django settings..."
+          if [ -f livestream_project/settings_production.py ]; then
+            echo "Production settings found"
+          else
+            echo "ERROR: Production settings not found"
+            exit 1
+          fi
+
+      - name: Build Docker image
         env:
           ECR_REGISTRY: ${{ steps.ecr-info.outputs.ECR_REGISTRY }}
           ECR_REPOSITORY: ${{ steps.ecr-info.outputs.ECR_REPOSITORY }}
           IMAGE_TAG: latest
         run: |
           echo "Building image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          
+          # Build with build args for better caching
+          docker build \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            --cache-from $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:prod-${GITHUB_SHA::7} \
+            .
+          
+          echo "Image built successfully"
+          docker images | grep $ECR_REPOSITORY
+
+      - name: Test Docker image locally
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-info.outputs.ECR_REGISTRY }}
+          ECR_REPOSITORY: ${{ steps.ecr-info.outputs.ECR_REPOSITORY }}
+          IMAGE_TAG: latest
+        run: |
+          echo "Testing Docker image locally..."
+          
+          # Start container in background
+          CONTAINER_ID=$(docker run -d \
+            -p 8000:8000 \
+            -e DEBUG=False \
+            -e DJANGO_SETTINGS_MODULE=livestream_project.settings_production \
+            -e SECRET_KEY=test-key-for-build \
+            $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG)
+          
+          echo "Container ID: $CONTAINER_ID"
+          
+          # Wait for container to start
+          echo "Waiting for container to start..."
+          sleep 30
+          
+          # Check if container is running
+          if docker ps | grep $CONTAINER_ID; then
+            echo "Container is running"
+            
+            # Test health endpoint
+            for i in {1..10}; do
+              if curl -f http://localhost:8000/health/ 2>/dev/null; then
+                echo "Health check passed!"
+                break
+              fi
+              echo "Health check attempt $i failed, retrying in 5s..."
+              sleep 5
+            done
+            
+            # Show container logs
+            echo "Container logs:"
+            docker logs $CONTAINER_ID
+          else
+            echo "ERROR: Container failed to start"
+            docker logs $CONTAINER_ID
+            exit 1
+          fi
+          
+          # Cleanup
+          docker stop $CONTAINER_ID
+          docker rm $CONTAINER_ID
+
+      - name: Push Docker image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-info.outputs.ECR_REGISTRY }}
+          ECR_REPOSITORY: ${{ steps.ecr-info.outputs.ECR_REPOSITORY }}
+          IMAGE_TAG: latest
+        run: |
+          echo "Pushing images to ECR..."
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:prod-${GITHUB_SHA::7}
+          
+          echo "Verifying image in ECR..."
+          aws ecr describe-images \
+            --repository-name $ECR_REPOSITORY \
+            --image-ids imageTag=$IMAGE_TAG \
+            --query 'imageDetails[0].imageSizeInBytes' \
+            --output text
 
       - name: Update Dockerrun.aws.json
         env:
@@ -55,31 +158,66 @@ jobs:
           ECR_REPOSITORY: ${{ steps.ecr-info.outputs.ECR_REPOSITORY }}
           IMAGE_TAG: latest
         run: |
+          echo "Updating Dockerrun.aws.json..."
           # Update the image reference in Dockerrun.aws.json
           sed -i "s|\"image\": \".*\"|\"image\": \"$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG\"|g" Dockerrun.aws.json
+          
+          echo "Validating Dockerrun.aws.json..."
+          python -m json.tool Dockerrun.aws.json > /dev/null
+          
           echo "Updated Dockerrun.aws.json:"
           cat Dockerrun.aws.json
 
-      - name: Zip Dockerrun.aws.json
-        run: zip deploy.zip Dockerrun.aws.json
+      - name: Create deployment package
+        run: |
+          echo "Creating deployment package..."
+          
+          # Create deployment directory
+          mkdir -p deploy-temp
+          
+          # Copy required files
+          cp Dockerrun.aws.json deploy-temp/
+          cp -r .ebextensions deploy-temp/ 2>/dev/null || echo "No .ebextensions directory found"
+          
+          # Create the zip file
+          cd deploy-temp
+          zip -r ../deploy.zip .
+          cd ..
+          
+          echo "Deployment package created:"
+          ls -la deploy.zip
+          unzip -l deploy.zip
 
-      - name: Ensure S3 bucket exists and upload zip
+      - name: Ensure S3 bucket exists and upload deployment package
         env:
-          AWS_REGION: ${{ secrets.AWS_REGION }}
           S3_BUCKET: ${{ secrets.S3_BUCKET }}
         run: |
+          echo "Checking S3 bucket: $S3_BUCKET"
+          
           # Check if bucket exists, create if not
           if ! aws s3api head-bucket --bucket "$S3_BUCKET" 2>/dev/null; then
             echo "Creating S3 bucket: $S3_BUCKET"
             if [ "$AWS_REGION" = "us-east-1" ]; then
               aws s3api create-bucket --bucket "$S3_BUCKET" --region "$AWS_REGION"
             else
-              aws s3api create-bucket --bucket "$S3_BUCKET" --region "$AWS_REGION" --create-bucket-configuration LocationConstraint="$AWS_REGION"
+              aws s3api create-bucket \
+                --bucket "$S3_BUCKET" \
+                --region "$AWS_REGION" \
+                --create-bucket-configuration LocationConstraint="$AWS_REGION"
             fi
+            
+            # Wait for bucket to be ready
+            aws s3api wait bucket-exists --bucket "$S3_BUCKET"
           fi
-          aws s3 cp deploy.zip s3://$S3_BUCKET/deploy.zip
+          
+          # Upload deployment package
+          S3_KEY="deployments/prod-${GITHUB_SHA::7}-$(date +%s).zip"
+          aws s3 cp deploy.zip "s3://$S3_BUCKET/$S3_KEY"
+          
+          echo "S3_KEY=$S3_KEY" >> $GITHUB_ENV
+          echo "Deployment package uploaded to: s3://$S3_BUCKET/$S3_KEY"
 
-      - name: Deploy to Elastic Beanstalk
+      - name: Deploy to Elastic Beanstalk with enhanced error handling
         env:
           S3_BUCKET: ${{ secrets.S3_BUCKET }}
           APP_NAME: ${{ secrets.EB_APPLICATION_NAME }}
@@ -89,40 +227,192 @@ jobs:
           echo "Creating application version: $VERSION_LABEL"
           echo "App: $APP_NAME, Environment: $ENV_NAME"
 
-          # Check current environment version
-          CURRENT_VERSION=$(aws elasticbeanstalk describe-environments --environment-names "$ENV_NAME" --query 'Environments[0].VersionLabel' --output text)
-          echo "Current environment version: $CURRENT_VERSION"
+          # Get current environment status
+          CURRENT_STATUS=$(aws elasticbeanstalk describe-environments \
+            --environment-names "$ENV_NAME" \
+            --query 'Environments[0].Status' \
+            --output text)
+          echo "Current environment status: $CURRENT_STATUS"
+
+          # Check if environment is in a deployable state
+          if [[ "$CURRENT_STATUS" != "Ready" && "$CURRENT_STATUS" != "Warning" ]]; then
+            echo "Environment is not ready for deployment (Status: $CURRENT_STATUS)"
+            echo "Waiting for environment to become ready..."
+            aws elasticbeanstalk wait environment-updated --environment-names "$ENV_NAME"
+          fi
 
           # Create application version
           aws elasticbeanstalk create-application-version \
             --application-name "$APP_NAME" \
             --version-label "$VERSION_LABEL" \
-            --source-bundle S3Bucket="$S3_BUCKET",S3Key=deploy.zip
+            --description "Production deployment from commit ${GITHUB_SHA::7}" \
+            --source-bundle S3Bucket="$S3_BUCKET",S3Key="$S3_KEY"
 
-          # Handle Sample version environment
-          if [ "$CURRENT_VERSION" = "Sample" ] || [ "$CURRENT_VERSION" = "null" ]; then
-            echo "Detected Sample/initial environment, performing initial deployment..."
-            aws elasticbeanstalk update-environment \
+          # Deploy with retry logic
+          MAX_ATTEMPTS=3
+          ATTEMPT=1
+          DEPLOYMENT_SUCCESS=false
+
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ] && [ "$DEPLOYMENT_SUCCESS" = false ]; do
+            echo "=== Deployment attempt $ATTEMPT/$MAX_ATTEMPTS ==="
+            
+            # Start deployment
+            if aws elasticbeanstalk update-environment \
               --environment-name "$ENV_NAME" \
-              --version-label "$VERSION_LABEL"
-          else
-            echo "Performing normal deployment update..."
-            aws elasticbeanstalk update-environment \
+              --version-label "$VERSION_LABEL"; then
+              
+              echo "Deployment command submitted successfully"
+              
+              # Wait for deployment with timeout
+              echo "Waiting for deployment to complete (timeout: 30 minutes)..."
+              
+              if timeout 1800 aws elasticbeanstalk wait environment-updated \
+                --environment-names "$ENV_NAME" \
+                --cli-read-timeout 0 \
+                --cli-connect-timeout 60; then
+                
+                # Check final status
+                FINAL_STATUS=$(aws elasticbeanstalk describe-environments \
+                  --environment-names "$ENV_NAME" \
+                  --query 'Environments[0].Status' \
+                  --output text)
+                
+                FINAL_HEALTH=$(aws elasticbeanstalk describe-environments \
+                  --environment-names "$ENV_NAME" \
+                  --query 'Environments[0].Health' \
+                  --output text)
+                
+                echo "Final Status: $FINAL_STATUS, Health: $FINAL_HEALTH"
+                
+                if [[ "$FINAL_STATUS" == "Ready" ]] && [[ "$FINAL_HEALTH" =~ ^(Green|Yellow)$ ]]; then
+                  echo "✅ Deployment completed successfully!"
+                  DEPLOYMENT_SUCCESS=true
+                  break
+                else
+                  echo "❌ Deployment completed but environment is not healthy"
+                fi
+              else
+                echo "❌ Deployment timed out or failed"
+              fi
+            else
+              echo "❌ Failed to submit deployment command"
+            fi
+            
+            if [ "$DEPLOYMENT_SUCCESS" = false ]; then
+              if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+                echo "Deployment attempt $ATTEMPT failed, waiting before retry..."
+                sleep 60
+              fi
+              ATTEMPT=$((ATTEMPT + 1))
+            fi
+          done
+
+          if [ "$DEPLOYMENT_SUCCESS" = false ]; then
+            echo "💥 All deployment attempts failed"
+            
+            # Get recent events for debugging
+            echo "Recent environment events:"
+            aws elasticbeanstalk describe-events \
               --environment-name "$ENV_NAME" \
-              --version-label "$VERSION_LABEL"
+              --max-items 10 \
+              --query 'Events[*].[EventDate,Severity,Message]' \
+              --output table
+            
+            exit 1
           fi
 
-          # Wait for deployment to complete
-          echo "Waiting for deployment to complete..."
-          aws elasticbeanstalk wait environment-updated --environment-names "$ENV_NAME"
+      - name: Post-deployment health verification
+        env:
+          ENV_NAME: ${{ secrets.EB_ENVIRONMENT_NAME }}
+        run: |
+          echo "=== Post-deployment health verification ==="
+          
+          # Get environment URL
+          ENV_URL=$(aws elasticbeanstalk describe-environments \
+            --environment-names "$ENV_NAME" \
+            --query 'Environments[0].CNAME' \
+            --output text)
+          
+          if [ "$ENV_URL" != "None" ] && [ ! -z "$ENV_URL" ]; then
+            echo "Environment URL: http://$ENV_URL"
+            
+            # Test health endpoint with retries
+            echo "Testing health endpoint..."
+            HEALTH_SUCCESS=false
+            
+            for i in {1..10}; do
+              echo "Health check attempt $i/10..."
+              
+              if curl -f -s --max-time 30 "http://$ENV_URL/health/" > /dev/null; then
+                echo "✅ Health check passed!"
+                HEALTH_SUCCESS=true
+                break
+              fi
+              
+              echo "Health check failed, waiting 15 seconds..."
+              sleep 15
+            done
+            
+            if [ "$HEALTH_SUCCESS" = false ]; then
+              echo "❌ Health check failed after 10 attempts"
+              echo "This may indicate application startup issues"
+              
+              # Try to get a response anyway for debugging
+              echo "Attempting to get health response for debugging:"
+              curl -v "http://$ENV_URL/health/" || true
+              
+              exit 1
+            fi
+            
+            # Test main API endpoint
+            echo "Testing main API endpoint..."
+            if curl -f -s --max-time 30 "http://$ENV_URL/api/v1/livestream/test-connection/" > /dev/null; then
+              echo "✅ API endpoint test passed!"
+            else
+              echo "⚠️  API endpoint test failed (may be expected if requires authentication)"
+            fi
+            
+          else
+            echo "⚠️  Could not retrieve environment URL"
+          fi
 
-          # Check final status
-          FINAL_STATUS=$(aws elasticbeanstalk describe-environments --environment-names "$ENV_NAME" --query 'Environments[0].Status' --output text)
-          echo "Deployment completed with status: $FINAL_STATUS"
+      - name: Cleanup old application versions
+        env:
+          APP_NAME: ${{ secrets.EB_APPLICATION_NAME }}
+        run: |
+          echo "Cleaning up old application versions..."
+          
+          # Keep only the latest 10 versions
+          aws elasticbeanstalk describe-application-versions \
+            --application-name "$APP_NAME" \
+            --query 'ApplicationVersions[10:].VersionLabel' \
+            --output text | tr '\t' '\n' | while read version; do
+            if [ ! -z "$version" ]; then
+              echo "Deleting old version: $version"
+              aws elasticbeanstalk delete-application-version \
+                --application-name "$APP_NAME" \
+                --version-label "$version" \
+                --delete-source-bundle
+            fi
+          done
+
+      - name: Notify deployment status
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "🎉 Production deployment completed successfully!"
+            echo "Commit: ${GITHUB_SHA::7}"
+            echo "Branch: ${{ github.ref_name }}"
+          else
+            echo "💥 Production deployment failed!"
+            echo "Check the logs above for details"
+          fi
 
   deploy-staging:
     if: github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/staging'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -132,7 +422,7 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
@@ -147,18 +437,22 @@ jobs:
           echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_OUTPUT
           echo "ECR_REPOSITORY=$ECR_REPOSITORY" >> $GITHUB_OUTPUT
 
-          echo "ECR Registry: $ECR_REGISTRY"
-          echo "ECR Repository: $ECR_REPOSITORY"
-
-      - name: Build, tag, and push Docker image to ECR
+      - name: Build and push staging Docker image
         env:
           ECR_REGISTRY: ${{ steps.ecr-info.outputs.ECR_REGISTRY }}
           ECR_REPOSITORY: ${{ steps.ecr-info.outputs.ECR_REPOSITORY }}
           IMAGE_TAG: staging
         run: |
           echo "Building staging image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          
+          docker build \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:staging-${GITHUB_SHA::7} \
+            .
+          
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:staging-${GITHUB_SHA::7}
 
       - name: Update Dockerrun.aws.json for staging
         env:
@@ -167,26 +461,32 @@ jobs:
           IMAGE_TAG: staging
         run: |
           sed -i "s|\"image\": \".*\"|\"image\": \"$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG\"|g" Dockerrun.aws.json
-          echo "Updated Dockerrun.aws.json for staging:"
-          cat Dockerrun.aws.json
+          python -m json.tool Dockerrun.aws.json > /dev/null
 
-      - name: Zip Dockerrun.aws.json
-        run: zip deploy.zip Dockerrun.aws.json
-
-      - name: Ensure S3 bucket exists and upload zip
+      - name: Create and upload staging deployment package
         env:
-          AWS_REGION: ${{ secrets.AWS_REGION }}
           S3_BUCKET: ${{ secrets.S3_BUCKET_STAGING }}
         run: |
+          mkdir -p deploy-temp
+          cp Dockerrun.aws.json deploy-temp/
+          cp -r .ebextensions deploy-temp/ 2>/dev/null || echo "No .ebextensions directory"
+          cd deploy-temp && zip -r ../deploy.zip . && cd ..
+          
+          # Ensure staging bucket exists
           if ! aws s3api head-bucket --bucket "$S3_BUCKET" 2>/dev/null; then
-            echo "Creating S3 bucket: $S3_BUCKET"
             if [ "$AWS_REGION" = "us-east-1" ]; then
               aws s3api create-bucket --bucket "$S3_BUCKET" --region "$AWS_REGION"
             else
-              aws s3api create-bucket --bucket "$S3_BUCKET" --region "$AWS_REGION" --create-bucket-configuration LocationConstraint="$AWS_REGION"
+              aws s3api create-bucket \
+                --bucket "$S3_BUCKET" \
+                --region "$AWS_REGION" \
+                --create-bucket-configuration LocationConstraint="$AWS_REGION"
             fi
           fi
-          aws s3 cp deploy.zip s3://$S3_BUCKET/deploy.zip
+          
+          S3_KEY="deployments/staging-${GITHUB_SHA::7}-$(date +%s).zip"
+          aws s3 cp deploy.zip "s3://$S3_BUCKET/$S3_KEY"
+          echo "S3_KEY=$S3_KEY" >> $GITHUB_ENV
 
       - name: Deploy to Elastic Beanstalk Staging
         env:
@@ -195,36 +495,79 @@ jobs:
           ENV_NAME: ${{ secrets.EB_STAGING_ENVIRONMENT_NAME }}
         run: |
           VERSION_LABEL="staging-${GITHUB_SHA::7}-$(date +%s)"
-          echo "Creating staging application version: $VERSION_LABEL"
-          echo "App: $APP_NAME, Environment: $ENV_NAME"
-
-          # Check current environment version
-          CURRENT_VERSION=$(aws elasticbeanstalk describe-environments --environment-names "$ENV_NAME" --query 'Environments[0].VersionLabel' --output text)
-          echo "Current staging environment version: $CURRENT_VERSION"
-
+          
           # Create application version
           aws elasticbeanstalk create-application-version \
             --application-name "$APP_NAME" \
             --version-label "$VERSION_LABEL" \
-            --source-bundle S3Bucket="$S3_BUCKET",S3Key=deploy.zip
+            --description "Staging deployment from commit ${GITHUB_SHA::7}" \
+            --source-bundle S3Bucket="$S3_BUCKET",S3Key="$S3_KEY"
 
-          # Handle Sample version environment
-          if [ "$CURRENT_VERSION" = "Sample" ] || [ "$CURRENT_VERSION" = "null" ]; then
-            echo "Detected Sample/initial staging environment, performing initial deployment..."
-            aws elasticbeanstalk update-environment \
-              --environment-name "$ENV_NAME" \
-              --version-label "$VERSION_LABEL"
-          else
-            echo "Performing normal staging deployment update..."
-            aws elasticbeanstalk update-environment \
-              --environment-name "$ENV_NAME" \
-              --version-label "$VERSION_LABEL"
-          fi
+          # Deploy to staging
+          aws elasticbeanstalk update-environment \
+            --environment-name "$ENV_NAME" \
+            --version-label "$VERSION_LABEL"
 
-          # Wait for deployment to complete
+          # Wait for deployment
           echo "Waiting for staging deployment to complete..."
           aws elasticbeanstalk wait environment-updated --environment-names "$ENV_NAME"
 
           # Check final status
-          FINAL_STATUS=$(aws elasticbeanstalk describe-environments --environment-names "$ENV_NAME" --query 'Environments[0].Status' --output text)
+          FINAL_STATUS=$(aws elasticbeanstalk describe-environments \
+            --environment-names "$ENV_NAME" \
+            --query 'Environments[0].Status' \
+            --output text)
+          
           echo "Staging deployment completed with status: $FINAL_STATUS"
+
+      - name: Test staging deployment
+        if: success()
+        env:
+          ENV_NAME: ${{ secrets.EB_STAGING_ENVIRONMENT_NAME }}
+        run: |
+          ENV_URL=$(aws elasticbeanstalk describe-environments \
+            --environment-names "$ENV_NAME" \
+            --query 'Environments[0].CNAME' \
+            --output text)
+          
+          if [ "$ENV_URL" != "None" ] && [ ! -z "$ENV_URL" ]; then
+            echo "Testing staging environment: http://$ENV_URL"
+            
+            for i in {1..5}; do
+              if curl -f "http://$ENV_URL/health/"; then
+                echo "✅ Staging health check passed!"
+                break
+              fi
+              echo "Staging health check attempt $i failed, retrying..."
+              sleep 10
+            done
+          fi
+
+  notify-completion:
+    needs: [deploy-production, deploy-staging]
+    if: always()
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Deployment Summary
+        run: |
+          echo "=== Deployment Summary ==="
+          echo "Commit: ${{ github.sha }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Timestamp: $(date)"
+          
+          if [ "${{ needs.deploy-production.result }}" == "success" ]; then
+            echo "✅ Production deployment: SUCCESS"
+          elif [ "${{ needs.deploy-production.result }}" == "skipped" ]; then
+            echo "⏭️  Production deployment: SKIPPED"
+          else
+            echo "❌ Production deployment: FAILED"
+          fi
+          
+          if [ "${{ needs.deploy-staging.result }}" == "success" ]; then
+            echo "✅ Staging deployment: SUCCESS"
+          elif [ "${{ needs.deploy-staging.result }}" == "skipped" ]; then
+            echo "⏭️  Staging deployment: SKIPPED"
+          else
+            echo "❌ Staging deployment: FAILED"
+          fi
