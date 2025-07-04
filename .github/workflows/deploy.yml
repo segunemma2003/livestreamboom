@@ -13,10 +13,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -25,14 +25,40 @@ jobs:
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Extract ECR registry and repository from URI
+        id: ecr-info
+        run: |
+          # Extract registry and repository from ECR_REPOSITORY_URI
+          ECR_URI="${{ secrets.ECR_REPOSITORY_URI }}"
+          ECR_REGISTRY=$(echo $ECR_URI | cut -d'/' -f1)
+          ECR_REPOSITORY=$(echo $ECR_URI | cut -d'/' -f2)
+
+          echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_OUTPUT
+          echo "ECR_REPOSITORY=$ECR_REPOSITORY" >> $GITHUB_OUTPUT
+
+          echo "ECR Registry: $ECR_REGISTRY"
+          echo "ECR Repository: $ECR_REPOSITORY"
+
       - name: Build, tag, and push Docker image to ECR
         env:
-          ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+          ECR_REGISTRY: ${{ steps.ecr-info.outputs.ECR_REGISTRY }}
+          ECR_REPOSITORY: ${{ steps.ecr-info.outputs.ECR_REPOSITORY }}
           IMAGE_TAG: latest
         run: |
+          echo "Building image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+      - name: Update Dockerrun.aws.json
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-info.outputs.ECR_REGISTRY }}
+          ECR_REPOSITORY: ${{ steps.ecr-info.outputs.ECR_REPOSITORY }}
+          IMAGE_TAG: latest
+        run: |
+          # Update the image reference in Dockerrun.aws.json
+          sed -i "s|\"image\": \".*\"|\"image\": \"$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG\"|g" Dockerrun.aws.json
+          echo "Updated Dockerrun.aws.json:"
+          cat Dockerrun.aws.json
 
       - name: Zip Dockerrun.aws.json
         run: zip deploy.zip Dockerrun.aws.json
@@ -42,35 +68,46 @@ jobs:
           AWS_REGION: ${{ secrets.AWS_REGION }}
           S3_BUCKET: ${{ secrets.S3_BUCKET }}
         run: |
+          # Check if bucket exists, create if not
           if ! aws s3api head-bucket --bucket "$S3_BUCKET" 2>/dev/null; then
-            aws s3api create-bucket --bucket "$S3_BUCKET" --region "$AWS_REGION" --create-bucket-configuration LocationConstraint="$AWS_REGION"
+            echo "Creating S3 bucket: $S3_BUCKET"
+            if [ "$AWS_REGION" = "us-east-1" ]; then
+              aws s3api create-bucket --bucket "$S3_BUCKET" --region "$AWS_REGION"
+            else
+              aws s3api create-bucket --bucket "$S3_BUCKET" --region "$AWS_REGION" --create-bucket-configuration LocationConstraint="$AWS_REGION"
+            fi
           fi
           aws s3 cp deploy.zip s3://$S3_BUCKET/deploy.zip
 
       - name: Deploy to Elastic Beanstalk
         env:
           S3_BUCKET: ${{ secrets.S3_BUCKET }}
-          APP_NAME: ${{ secrets.BEANSTALK_APP_NAME }}
-          ENV_NAME: ${{ secrets.BEANSTALK_ENV_NAME }}
+          APP_NAME: ${{ secrets.EB_APPLICATION_NAME }}
+          ENV_NAME: ${{ secrets.EB_ENVIRONMENT_NAME }}
         run: |
-          VERSION_LABEL="prod-${GITHUB_SHA::7}"
+          VERSION_LABEL="prod-${GITHUB_SHA::7}-$(date +%s)"
+          echo "Creating application version: $VERSION_LABEL"
+          echo "App: $APP_NAME, Environment: $ENV_NAME"
+
           aws elasticbeanstalk create-application-version \
-            --application-name $APP_NAME \
-            --version-label $VERSION_LABEL \
-            --source-bundle S3Bucket=$S3_BUCKET,S3Key=deploy.zip
+            --application-name "$APP_NAME" \
+            --version-label "$VERSION_LABEL" \
+            --source-bundle S3Bucket="$S3_BUCKET",S3Key=deploy.zip
+            
+          echo "Deploying to environment: $ENV_NAME"
           aws elasticbeanstalk update-environment \
-            --environment-name $ENV_NAME \
-            --version-label $VERSION_LABEL
+            --environment-name "$ENV_NAME" \
+            --version-label "$VERSION_LABEL"
 
   deploy-staging:
     if: github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/staging'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -79,14 +116,38 @@ jobs:
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Extract ECR registry and repository from URI
+        id: ecr-info
+        run: |
+          ECR_URI="${{ secrets.ECR_REPOSITORY_URI }}"
+          ECR_REGISTRY=$(echo $ECR_URI | cut -d'/' -f1)
+          ECR_REPOSITORY=$(echo $ECR_URI | cut -d'/' -f2)
+
+          echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_OUTPUT
+          echo "ECR_REPOSITORY=$ECR_REPOSITORY" >> $GITHUB_OUTPUT
+
+          echo "ECR Registry: $ECR_REGISTRY"
+          echo "ECR Repository: $ECR_REPOSITORY"
+
       - name: Build, tag, and push Docker image to ECR
         env:
-          ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+          ECR_REGISTRY: ${{ steps.ecr-info.outputs.ECR_REGISTRY }}
+          ECR_REPOSITORY: ${{ steps.ecr-info.outputs.ECR_REPOSITORY }}
           IMAGE_TAG: staging
         run: |
+          echo "Building staging image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+      - name: Update Dockerrun.aws.json for staging
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-info.outputs.ECR_REGISTRY }}
+          ECR_REPOSITORY: ${{ steps.ecr-info.outputs.ECR_REPOSITORY }}
+          IMAGE_TAG: staging
+        run: |
+          sed -i "s|\"image\": \".*\"|\"image\": \"$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG\"|g" Dockerrun.aws.json
+          echo "Updated Dockerrun.aws.json for staging:"
+          cat Dockerrun.aws.json
 
       - name: Zip Dockerrun.aws.json
         run: zip deploy.zip Dockerrun.aws.json
@@ -97,21 +158,31 @@ jobs:
           S3_BUCKET: ${{ secrets.S3_BUCKET_STAGING }}
         run: |
           if ! aws s3api head-bucket --bucket "$S3_BUCKET" 2>/dev/null; then
-            aws s3api create-bucket --bucket "$S3_BUCKET" --region "$AWS_REGION" --create-bucket-configuration LocationConstraint="$AWS_REGION"
+            echo "Creating S3 bucket: $S3_BUCKET"
+            if [ "$AWS_REGION" = "us-east-1" ]; then
+              aws s3api create-bucket --bucket "$S3_BUCKET" --region "$AWS_REGION"
+            else
+              aws s3api create-bucket --bucket "$S3_BUCKET" --region "$AWS_REGION" --create-bucket-configuration LocationConstraint="$AWS_REGION"
+            fi
           fi
           aws s3 cp deploy.zip s3://$S3_BUCKET/deploy.zip
 
-      - name: Deploy to Elastic Beanstalk
+      - name: Deploy to Elastic Beanstalk Staging
         env:
           S3_BUCKET: ${{ secrets.S3_BUCKET_STAGING }}
-          APP_NAME: ${{ secrets.BEANSTALK_APP_NAME_STAGING }}
-          ENV_NAME: ${{ secrets.BEANSTALK_ENV_NAME_STAGING }}
+          APP_NAME: ${{ secrets.EB_APPLICATION_NAME }}
+          ENV_NAME: ${{ secrets.EB_STAGING_ENVIRONMENT_NAME }}
         run: |
-          VERSION_LABEL="staging-${GITHUB_SHA::7}"
+          VERSION_LABEL="staging-${GITHUB_SHA::7}-$(date +%s)"
+          echo "Creating staging application version: $VERSION_LABEL"
+          echo "App: $APP_NAME, Environment: $ENV_NAME"
+
           aws elasticbeanstalk create-application-version \
-            --application-name $APP_NAME \
-            --version-label $VERSION_LABEL \
-            --source-bundle S3Bucket=$S3_BUCKET,S3Key=deploy.zip
+            --application-name "$APP_NAME" \
+            --version-label "$VERSION_LABEL" \
+            --source-bundle S3Bucket="$S3_BUCKET",S3Key=deploy.zip
+            
+          echo "Deploying to staging environment: $ENV_NAME"
           aws elasticbeanstalk update-environment \
-            --environment-name $ENV_NAME \
-            --version-label $VERSION_LABEL
+            --environment-name "$ENV_NAME" \
+            --version-label "$VERSION_LABEL"
