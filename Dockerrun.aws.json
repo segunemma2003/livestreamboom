@@ -5,8 +5,8 @@
       "name": "web",
       "image": "934155604952.dkr.ecr.us-east-1.amazonaws.com/livestream-service:latest",
       "essential": true,
-      "memory": 2048,
-      "cpu": 1024,
+      "memory": 4096,
+      "cpu": 2048,
       "portMappings": [
         {
           "hostPort": 80,
@@ -22,14 +22,18 @@
         {
           "name": "DJANGO_SETTINGS_MODULE",
           "value": "livestream_project.settings_production"
+        },
+        {
+          "name": "PYTHONPATH",
+          "value": "/app"
         }
       ],
       "healthCheck": {
         "command": ["CMD-SHELL", "curl -f http://localhost:8000/health/ || exit 1"],
         "interval": 30,
-        "timeout": 5,
+        "timeout": 10,
         "retries": 3,
-        "startPeriod": 60
+        "startPeriod": 120
       },
       "logConfiguration": {
         "logDriver": "awslogs",
