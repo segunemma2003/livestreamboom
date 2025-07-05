@@ -1,17 +1,14 @@
 {
-  "AWSEBDockerrunVersion": 2,
-  "containerDefinitions": [
-    {
-      "name": "web",
+  "AWSEBDockerrunVersion": 3,
+  "services": {
+    "web": {
       "image": "934155604952.dkr.ecr.us-east-1.amazonaws.com/livestream-service:latest",
       "essential": true,
       "memory": 4096,
-      "cpu": 2048,
-      "portMappings": [
+      "ports": [
         {
           "hostPort": 80,
-          "containerPort": 8000,
-          "protocol": "tcp"
+          "containerPort": 8000
         }
       ],
       "environment": [
@@ -20,7 +17,7 @@
           "value": "False"
         },
         {
-          "name": "DJANGO_SETTINGS_MODULE",
+          "name": "DJANGO_SETTINGS_MODULE", 
           "value": "livestream_project.settings_production"
         },
         {
@@ -28,15 +25,15 @@
           "value": "/app"
         }
       ],
-      "healthCheck": {
-        "command": ["CMD-SHELL", "curl -f http://localhost:8000/health/ || exit 1"],
+      "healthcheck": {
+        "test": ["CMD-SHELL", "curl -f http://localhost:8000/health/ || exit 1"],
         "interval": 30,
         "timeout": 10,
         "retries": 3,
-        "startPeriod": 120
+        "start_period": 120
       },
-      "logConfiguration": {
-        "logDriver": "awslogs",
+      "logging": {
+        "driver": "awslogs",
         "options": {
           "awslogs-group": "/aws/elasticbeanstalk/livestream-service",
           "awslogs-region": "us-east-1",
@@ -44,20 +41,14 @@
           "awslogs-create-group": "true"
         }
       },
-      "mountPoints": [
+      "volumes": [
         {
-          "sourceVolume": "recordings",
-          "containerPath": "/var/recordings"
+          "name": "recordings",
+          "host": {
+            "sourcePath": "/var/recordings"
+          }
         }
       ]
     }
-  ],
-  "volumes": [
-    {
-      "name": "recordings",
-      "host": {
-        "sourcePath": "/var/recordings"
-      }
-    }
-  ]
+  }
 }
